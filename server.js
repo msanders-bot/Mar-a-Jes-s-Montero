@@ -2,16 +2,16 @@ import OpenAI from "openai";
 import { WebSocketServer } from "ws";
 import http from "http";
 
-const PORT    = process.env.PORT         || 8080;
-const API_KEY = process.env.GROQ_API_KEY;
+const PORT         = process.env.PORT         || 8080;
+const GROQ_KEY     = process.env.GROQ_API_KEY;
+const RETELL_KEY   = process.env.RETELL_API_KEY;
+const RETELL_AGENT = process.env.RETELL_AGENT_ID || "agent_a25801dffab9265813be8c9422";
 
-if (!API_KEY) {
-  console.error("[FATAL] GROQ_API_KEY no configurada");
-  process.exit(1);
-}
+if (!GROQ_KEY)   { console.error("[FATAL] GROQ_API_KEY no configurada");   process.exit(1); }
+if (!RETELL_KEY) { console.error("[FATAL] RETELL_API_KEY no configurada"); process.exit(1); }
 
 const groq = new OpenAI({
-  apiKey:  API_KEY,
+  apiKey:  GROQ_KEY,
   baseURL: "https://api.groq.com/openai/v1",
 });
 
@@ -22,24 +22,24 @@ const SYSTEM_PROMPT = [
   "IDIOMAS Y TRATAMIENTO - MUY IMPORTANTE:",
   "- Habla SIEMPRE en espanol de Espana.",
   "- Tutea siempre usando TU. NUNCA uses vos ni formas rioplatenses ni latinoamericanas.",
-  "- Si te sale una forma incorrecta como vos tenes o vos podes, corrigela a tu tienes o tu puedes.",
   "",
   "PERSONALIDAD Y TONO:",
   "- Calida, cercana y directa, como Maria Jesus en sus apariciones publicas.",
-  "- Expresiones naturales que ella usa: mira, fijate, la verdad es que, desde luego, anda, venga, a que si.",
+  "- Expresiones naturales: mira, fijate, la verdad es que, desde luego, anda, venga, a que si.",
   "- Maximo 3-4 frases por turno, las respuestas largas se pierden en audio.",
   "- Escucha activa: reconoce lo que el ciudadano ha dicho antes de responder.",
   "- Cuando no sabe algo: ese es un tema que Maria Jesus tiene muy presente, lo traslado directamente a su equipo.",
   "",
   "ACENTO ANDALUZ NATURAL - SIN EXAGERAR:",
-  "Maria Jesus tiene un leve acento sevillano natural, no un acento de chiste. Usa con moderacion: mu bien, pa que te enteres, venga va.",
-  "NO elimines todas las eses ni escribas el texto foneticamente. Habla como habla Maria Jesus en television: andaluza pero completamente comprensible.",
+  "Maria Jesus tiene un leve acento sevillano natural, no un acento de chiste.",
+  "Usa con moderacion: mu bien, pa que te enteres, venga va.",
+  "NO elimines todas las eses. Habla como Maria Jesus en television: andaluza pero completamente comprensible.",
   "",
   "SOBRE MARIA JESUS MONTERO:",
   "- Sevillana, medica de formacion, especialista en medicina preventiva.",
   "- Ex-Consejera de Salud y de Hacienda de la Junta de Andalucia.",
   "- Actual Vicepresidenta Primera del Gobierno de Espana y Ministra de Hacienda.",
-  "- Frase central de su candidatura: No vuelvo porque nunca me marche.",
+  "- Frase central: No vuelvo porque nunca me marche.",
   "",
   "PROPUESTAS:",
   "SANIDAD: recuperar listas de espera, reforzar atencion primaria, acabar con el escandalo de cribados de cancer de mama, mas plazas MIR.",
@@ -69,16 +69,100 @@ const SYSTEM_PROMPT = [
   "- Responder con listas (es conversacion de voz)."
 ].join("\n");
 
-const httpServer = http.createServer((req, res) => {
-  if (req.url === "/health") {
+function buildSaludo(userName) {
+  const nombre = userName ? ", " + userName : "";
+  return "Hola" + nombre + ". Soy la asistente virtual de Maria Jesus Montero, su voz digital de campana. Maria Jesus me ha pedido que este aqui para escuchar lo que preocupa a los andaluces. Todo lo que me cuentes llegara a ella y a su equipo. Que cosas te preocupan? Como puede Maria Jesus hacer que tu vida y la de tu familia sea cada dia un poco mejor?";
+}
+
+// ── HTTP SERVER ───────────────────────────────────────────────────────────────
+const httpServer = http.createServer(async (req, res) => {
+
+  // CORS para el frontend
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  if (req.method === "OPTIONS") { res.writeHead(200); res.end(); return; }
+
+  // ── GET /health ─────────────────────────────────────────────────────────────
+  if (req.url === "/health" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", service: "mjm-custom-llm", llm: "groq/llama-3.3-70b" }));
+    res.end(JSON.stringify({ status: "ok", service: "mjm-llm" }));
     return;
   }
+
+  // ── POST /call — proxy seguro hacia Retell ──────────────────────────────────
+  if (req.url === "/call" && req.method === "POST") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body);
+
+        const retellRes = await fetch("https://api.retellai.com/v2/create-web-call", {
+          method:  "POST",
+          headers: {
+            "Content-Type":  "application/json",
+            "Authorization": "Bearer " + RETELL_KEY,
+          },
+          body: JSON.stringify({
+            agent_id: RETELL_AGENT,
+            retell_llm_dynamic_variables: {
+              user_first_name: data.nombre    || "",
+              user_last_name:  data.apellido  || "",
+              user_email:      data.email     || "",
+              user_phone:      data.tel       || "",
+              user_provincia:  data.provincia || "",
+            },
+            metadata: {
+              nombre:   data.nombre,
+              email:    data.email,
+              tel:      data.tel,
+              provincia: data.provincia,
+            },
+          }),
+        });
+
+        const json = await retellRes.json();
+        if (!retellRes.ok) throw new Error("Retell " + retellRes.status + ": " + JSON.stringify(json));
+
+        // Solo devolvemos lo que el frontend necesita — sin exponer la API key
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          access_token: json.access_token,
+          call_id:      json.call_id,
+        }));
+
+      } catch (err) {
+        console.error("[/call] Error: " + err.message);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // ── GET /recording/:callId — proxy para grabaciones ─────────────────────────
+  if (req.url && req.url.startsWith("/recording/") && req.method === "GET") {
+    const callId = req.url.replace("/recording/", "").split("?")[0];
+    try {
+      const r = await fetch("https://api.retellai.com/v2/get-call/" + callId, {
+        headers: { "Authorization": "Bearer " + RETELL_KEY }
+      });
+      const d = await r.json();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ recording_url: d.recording_url || null }));
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   res.writeHead(404);
   res.end();
 });
 
+// ── WEBSOCKET SERVER (Custom LLM para Retell) ─────────────────────────────────
 const wss = new WebSocketServer({ server: httpServer });
 
 wss.on("connection", (ws, req) => {
@@ -96,26 +180,29 @@ wss.on("connection", (ws, req) => {
 
     const { interaction_type, transcript = [], response_id, call } = payload;
 
+    const dynVars  = (call && call.retell_llm_dynamic_variables) || {};
+    const userName = dynVars.user_first_name || "";
+    const userProv = dynVars.user_provincia  || "";
+
+    // ── call_details: primer evento → enviamos saludo ─────────────────────────
+    if (interaction_type === "call_details") {
+      console.log("[WS] call_details → opening message");
+      if (ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify({
+          response_id:      0,
+          content:          buildSaludo(userName),
+          content_complete: true,
+          end_call:         false,
+        }));
+      }
+      return;
+    }
+
     if (interaction_type !== "response_required" && interaction_type !== "reminder_required") {
       return;
     }
 
     console.log("[WS] response_id=" + response_id + " | turns=" + transcript.length);
-
-    const dynVars  = (call && call.retell_llm_dynamic_variables) || {};
-    const userName = dynVars.user_first_name || "";
-    const userProv = dynVars.user_provincia  || "";
-
-    // ── OPENING MESSAGE ───────────────────────────────────────────────────────
-    if (transcript.length === 0) {
-      const saludo = "Hola" + (userName ? ", " + userName : ", vecino") + ". Soy la asistente virtual de Maria Jesus Montero, su voz digital de campana. Maria Jesus me ha pedido que este aqui para escuchar lo que preocupa a los andaluces. Todo lo que me cuentes llegara a ella y a su equipo. Que cosas te preocupan? Como puede Maria Jesus hacer que tu vida y la de tu familia sea cada dia un poco mejor?";
-      if (ws.readyState === ws.OPEN) {
-        ws.send(JSON.stringify({ response_id, content: saludo, content_complete: true, end_call: false }));
-      }
-      console.log("[WS] Opening message enviado - " + response_id);
-      return;
-    }
-    // ─────────────────────────────────────────────────────────────────────────
 
     let systemWithContext = SYSTEM_PROMPT;
     if (userName || userProv) {
@@ -136,14 +223,13 @@ wss.on("connection", (ws, req) => {
 
     try {
       const stream = await groq.chat.completions.create({
-        model:       "llama-3.3-70b-versatile",
-        max_tokens:  120,
-        stream:      true,
-        messages:    [{ role: "system", content: systemWithContext }, ...messages],
+        model:      "llama-3.3-70b-versatile",
+        max_tokens: 120,
+        stream:     true,
+        messages:   [{ role: "system", content: systemWithContext }, ...messages],
       });
 
       let fullText = "";
-
       for await (const chunk of stream) {
         const text = chunk.choices[0]?.delta?.content || "";
         if (text) {
@@ -173,5 +259,5 @@ wss.on("connection", (ws, req) => {
 });
 
 httpServer.listen(PORT, () => {
-  console.log("[Server] MJM Custom LLM (Groq/Llama3) en puerto " + PORT);
+  console.log("[Server] MJM LLM + Call Proxy en puerto " + PORT);
 });
