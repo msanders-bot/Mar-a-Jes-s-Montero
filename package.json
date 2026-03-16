@@ -1,0 +1,18 @@
+{
+  "name": "psoa-custom-llm",
+  "version": "1.0.0",
+  "description": "Retell Custom LLM — PSOE-A Andalucía Habla 2026",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
